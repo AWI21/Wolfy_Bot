@@ -33,13 +33,15 @@ async function startBot() {
   await loadCommands(client);
   loadEvents(client);
 
-  client.once('clientReady', () => {
+  // Fixed: Event name is 'ready', not 'clientReady'
+  client.once('ready', () => {
     startBirthdayChecker(client);
     startNotificationPoller(client);
     startXPFlusher();
   });
 
-  await client.login(process.env.BOT_TOKEN);
+  // Fixed: Using DISCORD_TOKEN to match your .env variable
+  await client.login(process.env.DISCORD_TOKEN);
 
   return client;
 }

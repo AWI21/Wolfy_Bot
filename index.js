@@ -1,9 +1,12 @@
 require('dotenv').config();
-require('./deploy-commands.js');
+const { deployCommands } = require('./deployCommands');
 const { startBot } = require('./src/bot');
 const { startWebServer } = require('./src/web/server');
 const registerAdvancedLogs = require('./src/utils/advancedLogs.js');
 const { flushXP } = require('./src/systems/leveling');
+
+// Odpal rejestrację w tle – nie blokuje logowania bota
+deployCommands().catch(err => console.error('Błąd rejestracji komend:', err));
 
 let client = null;
 

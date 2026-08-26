@@ -48,18 +48,18 @@ async function deployCommands() {
     if (process.env.GUILD_ID) {
       await rest.put(
           Routes.applicationGuildCommands(clientId, process.env.GUILD_ID),
-          { body: commands },
+          { body: commands, signal: AbortSignal.timeout(15_000) },
       );
       console.log(`✅ Successfully registered ${commands.length} GUILD slash commands.`);
     } else {
       await rest.put(
           Routes.applicationCommands(clientId),
-          { body: commands },
+          { body: commands, signal: AbortSignal.timeout(15_000) },
       );
       console.log(`✅ Successfully registered ${commands.length} GLOBAL slash commands.`);
     }
   } catch (err) {
-    console.error('❌ Discord API Error during slash command deploy:');
+    console.error('❌ Discord API Error during slash command deploy (or it timed out after 15s):');
     console.error(err);
   }
 }

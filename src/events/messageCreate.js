@@ -2,6 +2,14 @@ const { getConfig, getCustomCommand, getCommandChannels } = require('../database
 const { handleXP } = require('../systems/leveling');
 const { handleAutomod } = require('../systems/automod');
 
+async function safeReply(message, options) {
+  try {
+    return await message.reply({ ...options, failIfNotExist: false });
+  } catch (err) {
+    return message.channel.send(options).catch(() => {});
+  }
+}
+
 module.exports = {
   name: 'messageCreate',
   async execute(message, client) {
@@ -26,15 +34,15 @@ module.exports = {
       if (allowedChannels.length > 0 && !allowedChannels.includes(message.channel.id)) {
         const isMod = message.member.roles.cache.has(modRoleId) || message.member.permissions.has(8n);
         if (!isMod) {
-          const msg = await message.reply({ content: `⚠️ Commands can only be used in: ${allowedChannels.map(id => `<#${id}>`).join(', ')}`, allowedMentions: { repliedUser: false } });
-          setTimeout(() => { message.delete().catch(() => {}); msg.delete().catch(() => {}); }, 5000);
+          const msg = await safeReply(message, { content: `⚠️ Commands can only be used in: ${allowedChannels.map(id => `<#${id}>`).join(', ')}`, allowedMentions: { repliedUser: false } });
+          setTimeout(() => { message.delete().catch(() => {}); msg?.delete().catch(() => {}); }, 5000);
           return;
         }
       }
 
       if (command.modOnly) {
         const isMod = message.member.roles.cache.has(modRoleId) || message.member.permissions.has(8n);
-        if (!isMod) return message.reply({ content: '❌ You need the **Moderator** role to use this command.', allowedMentions: { repliedUser: false } });
+        if (!isMod) return safeReply(message, { content: '❌ You need the **Moderator** role to use this command.', allowedMentions: { repliedUser: false } });
       }
 
       if (!client.cooldowns.has(commandName)) client.cooldowns.set(commandName, new Map());
@@ -51,16 +59,16 @@ module.exports = {
         await command.execute(message, args, client, prefix);
       } catch (err) {
         console.error(err);
-        message.reply({ content: '❌ An error occurred.', allowedMentions: { repliedUser: false } });
+        safeReply(message, { content: '❌ An error occurred.', allowedMentions: { repliedUser: false } });
       }
       return;
     }
 
-    
+
     const custom = await getCustomCommand(message.guild.id, commandName);
     if (custom) {
 
-      
+
       if (custom.cooldown && custom.cooldown > 0) {
         if (!client.customCmdCooldowns) client.customCmdCooldowns = new Map();
 
@@ -70,20 +78,20 @@ module.exports = {
 
         if (now < cooldownEnd) {
           const timeLeft = Math.ceil((cooldownEnd - now) / 1000);
-          const msg = await message.reply({
+          const msg = await safeReply(message, {
             content: `⏳ Take a breath! You can use \`${prefix}${commandName}\` again in **${timeLeft}s**.`,
             allowedMentions: { repliedUser: false }
           });
-          
-          setTimeout(() => { message.delete().catch(() => {}); msg.delete().catch(() => {}); }, 5000);
+
+          setTimeout(() => { message.delete().catch(() => {}); msg?.delete().catch(() => {}); }, 5000);
           return;
         }
 
-        
+
         client.customCmdCooldowns.set(cooldownKey, now + (custom.cooldown * 1000));
       }
 
-      
+
       if (custom.allowed_roles !== undefined && custom.allowed_roles !== null && custom.allowed_roles !== '') {
         let allowedRoles = [];
 
@@ -107,11 +115,11 @@ module.exports = {
           const isAdmin = message.member.permissions.has(8n);
 
           if (!hasRole && !isAdmin) {
-            const noPermMsg = await message.reply({
+            const noPermMsg = await safeReply(message, {
               content: '❌ You do not have the required role to use this custom command.',
               allowedMentions: { repliedUser: false }
             });
-            setTimeout(() => { message.delete().catch(() => {}); noPermMsg.delete().catch(() => {}); }, 5000);
+            setTimeout(() => { message.delete().catch(() => {}); noPermMsg?.delete().catch(() => {}); }, 5000);
             return;
           }
         }
@@ -119,16 +127,16 @@ module.exports = {
 
       let savedResponse = custom.response;
 
-      
+
       const target = message.mentions.users.first();
       if (savedResponse.includes('{target}') && !target) {
-        return message.reply({
+        return safeReply(message, {
           content: `⚠️ This command requires you to tag a user! Example: \`${prefix}${commandName} @user\``,
           allowedMentions: { repliedUser: false }
-        }).catch(() => {});
+        });
       }
 
-      
+
       let chosenResponse = savedResponse;
       if (savedResponse.includes('|')) {
         const rawOptions = savedResponse.split('|').map(opt => opt.trim()).filter(Boolean);
@@ -164,20 +172,20 @@ module.exports = {
         }
       }
 
-      
+
       chosenResponse = chosenResponse.replace(/{random:(\d+)-(\d+)}/g, (match, min, max) => {
         const low = parseInt(min, 10);
         const high = parseInt(max, 10);
         return Math.floor(Math.random() * (high - low + 1)) + low;
       });
 
-      
+
       let finalResponse = chosenResponse
           .replace(/{author}/g, message.author.toString())
           .replace(/{user}/g, message.author.toString())
           .replace(/{target}/g, target ? target.toString() : '');
 
-      
+
       const allowedMentions = { parse: ['users', 'roles'] };
 
       if (finalResponse.includes('{ping:everyone}')) {
@@ -196,7 +204,7 @@ module.exports = {
         return '';
       });
 
-      
+
       if (finalResponse.trim().length > 0) {
         const sentMsg = await message.channel.send({
           content: finalResponse,

@@ -4,6 +4,7 @@ const { loadEvents } = require('./handlers/eventHandler');
 const { initDatabase } = require('./database/db');
 const { startBirthdayChecker } = require('./systems/birthday');
 const { startNotificationPoller } = require('./systems/notifications');
+const { startXPFlusher } = require('./systems/leveling');
 const chalk = require('chalk');
 
 const client = new Client({
@@ -35,6 +36,7 @@ async function startBot() {
   client.once('clientReady', () => {
     startBirthdayChecker(client);
     startNotificationPoller(client);
+    startXPFlusher();
   });
 
   await client.login(process.env.BOT_TOKEN);

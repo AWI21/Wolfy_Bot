@@ -5,26 +5,39 @@ const config = require('../config');
 const { formatTemplate, resolveChannel } = require('../utils/helpers');
 
 const POLL_INTERVAL = 5 * 60 * 1000;
+const FETCH_TIMEOUT_MS = 5000;
 
 let twitchTokenCache = { token: null, expiresAt: 0 };
+let twitchTokenPromise = null;
 
 async function getTwitchToken() {
   if (twitchTokenCache.token && Date.now() < twitchTokenCache.expiresAt) {
     return twitchTokenCache.token;
   }
-  const tokenRes = await axios.post('https://id.twitch.tv/oauth2/token', null, {
-    params: {
-      client_id: process.env.TWITCH_CLIENT_ID,
-      client_secret: process.env.TWITCH_CLIENT_SECRET,
-      grant_type: 'client_credentials',
-    },
-    timeout: 10000,
-  });
-  twitchTokenCache = {
-    token: tokenRes.data.access_token,
-    expiresAt: Date.now() + Math.max(tokenRes.data.expires_in - 300, 60) * 1000,
-  };
-  return twitchTokenCache.token;
+  // Single-flight: concurrent guilds must never fire duplicate token requests.
+  if (twitchTokenPromise) return twitchTokenPromise;
+
+  twitchTokenPromise = (async () => {
+    try {
+      const tokenRes = await axios.post('https://id.twitch.tv/oauth2/token', null, {
+        params: {
+          client_id: process.env.TWITCH_CLIENT_ID,
+          client_secret: process.env.TWITCH_CLIENT_SECRET,
+          grant_type: 'client_credentials',
+        },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+      twitchTokenCache = {
+        token: tokenRes.data.access_token,
+        expiresAt: Date.now() + Math.max(tokenRes.data.expires_in - 300, 60) * 1000,
+      };
+      return twitchTokenCache.token;
+    } finally {
+      twitchTokenPromise = null;
+    }
+  })();
+
+  return twitchTokenPromise;
 }
 
 function invalidateTwitchToken() {
@@ -39,15 +52,29 @@ function startNotificationPoller(client) {
 
 async function pollAll(client) {
   console.log('🔍 [System Poller] Beginning scanning cycle for social media streams...');
-  for (const guild of client.guilds.cache.values()) {
-    await pollYouTube(client, guild).catch(err => console.error(`[YouTube poll error][${guild.name}]`, err.message));
-    await pollTwitch(client, guild).catch(err => console.error(`[Twitch poll error][${guild.name}]`, err.message));
-    await pollTikTok(client, guild).catch(() => {});
-    await pollInstagram(client, guild).catch(() => {});
+  const guilds = [...client.guilds.cache.values()];
+
+  const results = await Promise.allSettled(guilds.map(guild => pollGuild(guild)));
+
+  const rejected = results.filter(r => r.status === 'rejected');
+  if (rejected.length > 0) {
+    console.error(`[Poller] ${rejected.length}/${guilds.length} guild(s) threw an unexpected error this cycle:`, rejected[0].reason?.message);
   }
 }
 
-async function pollYouTube(client, guild) {
+async function pollGuild(guild) {
+  const [yt, twitch, tiktok, ig] = await Promise.allSettled([
+    pollYouTube(guild),
+    pollTwitch(guild),
+    pollTikTok(guild),
+    pollInstagram(guild),
+  ]);
+
+  if (yt.status === 'rejected') console.error(`[YouTube poll error][${guild.name}]`, yt.reason?.message);
+  if (twitch.status === 'rejected') console.error(`[Twitch poll error][${guild.name}]`, twitch.reason?.message);
+}
+
+async function pollYouTube(guild) {
   const channelIdsRaw = await getConfig(guild.id, 'yt_channel_id');
   const notifChannelId = await getConfig(guild.id, 'yt_notif_channel');
 
@@ -58,49 +85,56 @@ async function pollYouTube(client, guild) {
 
   const ytChannelIds = channelIdsRaw.split(',').map(s => s.trim()).filter(Boolean);
 
-  for (const ytChannelId of ytChannelIds) {
+  await Promise.allSettled(ytChannelIds.map(ytChannelId => pollYouTubeChannel(guild, discordChannel, ytChannelId)));
+}
+
+async function pollYouTubeChannel(guild, discordChannel, ytChannelId) {
+  try {
+    const url = `https://www.youtube.com/feeds/videos.xml?channel_id=${ytChannelId}`;
+
+    const res = await axios.get(url, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/rss+xml,application/xml,text/xml,*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache',
+      },
+      validateStatus: () => true,
+    });
+
+    if (res.status !== 200) return;
+
+    let parsed;
     try {
-      const url = `https://www.youtube.com/feeds/videos.xml?channel_id=${ytChannelId}`;
+      parsed = await xml2js.parseStringPromise(res.data);
+    } catch (parseErr) {
+      return;
+    }
 
-      const res = await axios.get(url, {
-        timeout: 15000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/rss+xml,application/xml,text/xml,*/*',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Cache-Control': 'no-cache',
-        },
-        validateStatus: () => true,
-      });
+    const entries = parsed?.feed?.entry || [];
+    if (!entries.length) return;
 
-      if (res.status !== 200) continue;
+    // Check the top 5 (not just entries[0]) — RSS delays and Shorts can push a
+    // genuinely new upload down a slot or two. Oldest-of-the-batch first so any
+    // catch-up posts land in upload order.
+    const candidates = entries.slice(0, 5).reverse();
 
-      let parsed;
-      try {
-        parsed = await xml2js.parseStringPromise(res.data);
-      } catch (parseErr) {
-        continue;
-      }
-
-      const entries = parsed?.feed?.entry || [];
-      if (!entries.length) continue;
-
-      const latest = entries[0];
-      const videoId = latest['yt:videoId']?.[0];
+    for (const entry of candidates) {
+      const videoId = entry['yt:videoId']?.[0];
       if (!videoId) continue;
-
       if (await hasPosted(videoId, 'youtube', guild.id)) continue;
 
-      const title = latest.title?.[0] || 'New Video';
-      const link = latest.link?.[0]?.$?.href || `https://www.youtube.com/watch?v=${videoId}`;
-      const author = latest.author?.[0]?.name?.[0] || 'YouTube';
+      const title = entry.title?.[0] || 'New Video';
+      const link = entry.link?.[0]?.$?.href || `https://www.youtube.com/watch?v=${videoId}`;
+      const author = entry.author?.[0]?.name?.[0] || 'YouTube';
 
       const pingRole = await getConfig(guild.id, 'yt_ping_role');
 
       let actionText = 'uploaded a video';
       if (link.includes('/shorts/')) {
         actionText = 'posted a short';
-      } else if (link.includes('live') || latest.isLive) {
+      } else if (link.includes('live') || entry.isLive) {
         actionText = 'went live';
       }
 
@@ -120,14 +154,13 @@ async function pollYouTube(client, guild) {
       await markPosted(videoId, 'youtube', guild.id);
 
       console.log(`[YouTube] ✅ Alert posted successfully: "${title}" (${videoId}) inside guild: ${guild.name}`);
-
-    } catch (err) {
-      console.error(`[YouTube] Error processing channel ${ytChannelId} for guild ${guild.name}: ${err.message}`);
     }
+  } catch (err) {
+    console.error(`[YouTube] Error processing channel ${ytChannelId} for guild ${guild.name}: ${err.message}`);
   }
 }
 
-async function pollTwitch(client, guild) {
+async function pollTwitch(guild) {
   const twitchUsersRaw = await getConfig(guild.id, 'twitch_username');
   const notifChannelId = await getConfig(guild.id, 'twitch_notif_channel');
   if (!twitchUsersRaw || !notifChannelId) return;
@@ -146,61 +179,63 @@ async function pollTwitch(client, guild) {
 
   const twitchUsers = twitchUsersRaw.split(',').map(s => s.trim()).filter(Boolean);
 
-  for (const twitchUser of twitchUsers) {
+  await Promise.allSettled(twitchUsers.map(twitchUser => pollTwitchUser(guild, discordChannel, twitchUser, token)));
+}
+
+async function pollTwitchUser(guild, discordChannel, twitchUser, token) {
+  try {
+    let streamRes;
     try {
-      let streamRes;
-      try {
-        streamRes = await axios.get('https://api.twitch.tv/helix/streams', {
-          params: { user_login: twitchUser },
-          headers: {
-            'Client-ID': process.env.TWITCH_CLIENT_ID,
-            Authorization: `Bearer ${token}`,
-          },
-          timeout: 10000,
-        });
-      } catch (err) {
-        if (err.response?.status === 401) invalidateTwitchToken();
-        throw err;
-      }
-
-      const stream = streamRes.data.data?.[0];
-      if (!stream) continue;
-
-      const streamKey = `twitch_${stream.id}`;
-      if (await hasPosted(streamKey, 'twitch', guild.id)) continue;
-
-      const pingRole = await getConfig(guild.id, 'twitch_ping_role');
-      const link = `https://twitch.tv/${twitchUser}`;
-      const author = stream.user_name || twitchUser;
-      const title = stream.title || 'Live Stream';
-
-      const customMsg = await getConfig(guild.id, 'twitch_notif_msg');
-      const template = customMsg || config.twitchNotifMsg;
-
-      const messageContent = formatTemplate(template, {
-        role: pingRole,
-        author,
-        title,
-        link,
-        guildName: guild.name,
+      streamRes = await axios.get('https://api.twitch.tv/helix/streams', {
+        params: { user_login: twitchUser },
+        headers: {
+          'Client-ID': process.env.TWITCH_CLIENT_ID,
+          Authorization: `Bearer ${token}`,
+        },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
-
-      await discordChannel.send({ content: messageContent });
-      await markPosted(streamKey, 'twitch', guild.id);
-
-      console.log(`[Twitch] ✅ Alert posted successfully: ${twitchUser} (${stream.id}) inside guild: ${guild.name}`);
     } catch (err) {
-      console.error(`[Twitch] Error for user ${twitchUser} in guild ${guild.name}: ${err.message}`);
+      if (err.response?.status === 401) invalidateTwitchToken();
+      throw err;
     }
+
+    const stream = streamRes.data.data?.[0];
+    if (!stream) return;
+
+    const streamKey = `twitch_${stream.id}`;
+    if (await hasPosted(streamKey, 'twitch', guild.id)) return;
+
+    const pingRole = await getConfig(guild.id, 'twitch_ping_role');
+    const link = `https://twitch.tv/${twitchUser}`;
+    const author = stream.user_name || twitchUser;
+    const title = stream.title || 'Live Stream';
+
+    const customMsg = await getConfig(guild.id, 'twitch_notif_msg');
+    const template = customMsg || config.twitchNotifMsg;
+
+    const messageContent = formatTemplate(template, {
+      role: pingRole,
+      author,
+      title,
+      link,
+      guildName: guild.name,
+    });
+
+    await discordChannel.send({ content: messageContent });
+    await markPosted(streamKey, 'twitch', guild.id);
+
+    console.log(`[Twitch] ✅ Alert posted successfully: ${twitchUser} (${stream.id}) inside guild: ${guild.name}`);
+  } catch (err) {
+    console.error(`[Twitch] Error for user ${twitchUser} in guild ${guild.name}: ${err.message}`);
   }
 }
 
-async function pollTikTok(client, guild) {
+async function pollTikTok(guild) {
   const notifChannelId = await getConfig(guild.id, 'tiktok_notif_channel');
   if (!notifChannelId || !process.env.TIKTOK_ACCESS_TOKEN) return;
 }
 
-async function pollInstagram(client, guild) {
+async function pollInstagram(guild) {
   const notifChannelId = await getConfig(guild.id, 'instagram_notif_channel');
   if (!notifChannelId || !process.env.INSTAGRAM_ACCESS_TOKEN) return;
 }

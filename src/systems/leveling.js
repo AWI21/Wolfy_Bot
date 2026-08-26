@@ -1,10 +1,53 @@
 const { EmbedBuilder } = require('discord.js');
-const { getUser, addXP, setLevel, getConfig, getAchievements, grantAchievement, hasAchievement } = require('../database/db');
+const { getUser, bulkUpsertUserStats, getConfig, getAchievements, grantAchievement, hasAchievement } = require('../database/db');
 const config = require('../config');
 const { formatTemplate, resolveChannel } = require('../utils/helpers');
 
 const LEVEL_ROLES = [5, 10, 20, 30, 40, 50, 100];
 const XP_PER_MESSAGE = 4;
+const FLUSH_INTERVAL_MS = 45_000;
+
+const xpState = new Map();
+let flushTimer = null;
+
+function key(userId, guildId) { return `${userId}-${guildId}`; }
+
+async function hydrate(userId, guildId) {
+  const k = key(userId, guildId);
+  let entry = xpState.get(k);
+  if (entry) return entry;
+
+  const row = await getUser(userId, guildId);
+  entry = {
+    userId,
+    guildId,
+    xp: row?.xp || 0,
+    messages: row?.messages || 0,
+    level: row?.level || 0,
+    dirty: false,
+  };
+  xpState.set(k, entry);
+  return entry;
+}
+
+async function flushXP() {
+  const dirtyEntries = [...xpState.values()].filter(e => e.dirty);
+  if (dirtyEntries.length === 0) return;
+
+  try {
+    await bulkUpsertUserStats(dirtyEntries.map(e => ({
+      userId: e.userId, guildId: e.guildId, xp: e.xp, messages: e.messages, level: e.level,
+    })));
+    for (const e of dirtyEntries) e.dirty = false;
+  } catch (err) {
+    console.error('[Leveling] Bulk XP flush failed, will retry next cycle:', err.message);
+  }
+}
+
+function startXPFlusher() {
+  if (flushTimer) return;
+  flushTimer = setInterval(() => flushXP().catch(() => {}), FLUSH_INTERVAL_MS);
+}
 
 function calculateLevel(totalXp) {
   let level = 0;
@@ -34,25 +77,31 @@ function xpForNextLevel(level) {
 }
 
 async function handleXP(message, client) {
-  const key = `${message.author.id}-${message.guild.id}`;
-  if (client.xpCooldowns.has(key)) return;
-  client.xpCooldowns.set(key, true);
-  setTimeout(() => client.xpCooldowns.delete(key), 15_000);
+  const cooldownKey = key(message.author.id, message.guild.id);
+  if (client.xpCooldowns.has(cooldownKey)) return;
+  client.xpCooldowns.set(cooldownKey, true);
+  setTimeout(() => client.xpCooldowns.delete(cooldownKey), 15_000);
 
-  let userData = await getUser(message.author.id, message.guild.id);
-  const oldLevel = userData ? calculateLevel(userData.xp) : 0;
+  const entry = await hydrate(message.author.id, message.guild.id);
+  const oldLevel = entry.level;
 
-  await addXP(message.author.id, message.guild.id, XP_PER_MESSAGE);
+  entry.xp += XP_PER_MESSAGE;
+  entry.messages += 1;
+  entry.dirty = true;
 
-  userData = await getUser(message.author.id, message.guild.id);
-  const newLevel = calculateLevel(userData.xp);
+  const newLevel = calculateLevel(entry.xp);
 
   if (newLevel > oldLevel) {
-    await setLevel(message.author.id, message.guild.id, newLevel);
-    await handleLevelUp(message, client, newLevel, userData.xp);
+    entry.level = newLevel;
+    await handleLevelUp(message, client, newLevel, entry.xp);
   }
 
-  await checkAchievements(message, client, userData);
+  await checkAchievements(message, client, entry);
+}
+
+async function getEffectiveUserData(userId, guildId) {
+  const entry = await hydrate(userId, guildId);
+  return { xp: entry.xp, messages: entry.messages, level: entry.level };
 }
 
 async function handleLevelUp(message, client, newLevel, totalXp) {
@@ -99,25 +148,24 @@ async function handleLevelUp(message, client, newLevel, totalXp) {
   await targetChannel.send({ content: messageContent }).catch(() => {});
 }
 
-async function checkAchievements(message, client, userData) {
+async function checkAchievements(message, client, entry) {
   const achievements = await getAchievements(message.guild.id);
   for (const ach of achievements) {
     if (await hasAchievement(message.author.id, message.guild.id, ach.id)) continue;
     let earned = false;
-    const currentLevel = calculateLevel(userData.xp);
     switch (ach.requirement_type) {
-      case 'messages': earned = userData.messages >= ach.requirement_value; break;
-      case 'level': earned = currentLevel >= ach.requirement_value; break;
-      case 'xp': earned = userData.xp >= ach.requirement_value; break;
+      case 'messages': earned = entry.messages >= ach.requirement_value; break;
+      case 'level': earned = entry.level >= ach.requirement_value; break;
+      case 'xp': earned = entry.xp >= ach.requirement_value; break;
     }
     if (earned) {
       const granted = await grantAchievement(message.author.id, message.guild.id, ach.id);
-      if (granted) await notifyAchievement(message, client, ach);
+      if (granted) await notifyAchievement(message, client, ach, entry);
     }
   }
 }
 
-async function notifyAchievement(message, client, achievement) {
+async function notifyAchievement(message, client, achievement, entry) {
   const customMsg = await getConfig(message.guild.id, 'achievement_notif_msg');
   const template = customMsg || config.achievementNotifMsg;
 
@@ -143,7 +191,8 @@ async function notifyAchievement(message, client, achievement) {
   }
 
   if (achievement.reward_xp > 0) {
-    await addXP(message.author.id, message.guild.id, achievement.reward_xp);
+    entry.xp += achievement.reward_xp;
+    entry.dirty = true;
     embed.addFields({ name: '⭐ XP Reward', value: `+${achievement.reward_xp} XP`, inline: true });
   }
 
@@ -171,5 +220,8 @@ module.exports = {
   calculateLevel,
   xpForNextLevel,
   totalXpForLevel,
-  getRankStats
+  getRankStats,
+  getEffectiveUserData,
+  startXPFlusher,
+  flushXP,
 };

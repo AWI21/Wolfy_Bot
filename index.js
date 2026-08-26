@@ -3,6 +3,7 @@ require('./deploy-commands.js');
 const { startBot } = require('./src/bot');
 const { startWebServer } = require('./src/web/server');
 const registerAdvancedLogs = require('./src/utils/advancedLogs.js');
+const { flushXP } = require('./src/systems/leveling');
 
 let client = null;
 
@@ -27,6 +28,11 @@ async function init() {
 
 const handleShutdown = async (signal) => {
     console.log(`Received ${signal}. Powering down instance...`);
+    try {
+        await flushXP();
+    } catch (err) {
+        console.error('Error flushing pending XP on shutdown:', err);
+    }
     if (client) {
         try {
             await client.destroy();

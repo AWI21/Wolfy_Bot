@@ -1,7 +1,7 @@
 const { AttachmentBuilder, SlashCommandBuilder } = require('discord.js');
-const { getUser, ensureUser, getUserRank } = require('../../database/db');
+const { getUserRank } = require('../../database/db');
 const { generateLevelCard } = require('../../utils/canvas');
-const { calculateLevel, getRankStats } = require('../../systems/leveling');
+const { getRankStats, getEffectiveUserData } = require('../../systems/leveling');
 
 module.exports = {
   name: 'rank',
@@ -16,8 +16,11 @@ module.exports = {
     const loading = await message.channel.send('Searching for your stats...');
     const attachment = await _genCard(target, message.guild);
     await loading.delete().catch(() => {});
-    if (attachment) await message.reply({ files: [attachment] });
-    else await message.reply(`Could not load level data for **${target.username}**`);
+    if (attachment) {
+      await message.reply({ files: [attachment], failIfNotExist: false }).catch(() => message.channel.send({ files: [attachment] }).catch(() => {}));
+    } else {
+      await message.reply({ content: `Could not load level data for **${target.username}**`, failIfNotExist: false }).catch(() => message.channel.send(`Could not load level data for **${target.username}**`).catch(() => {}));
+    }
   },
 
   async executeSlash(interaction) {
@@ -30,8 +33,7 @@ module.exports = {
 };
 
 async function _genCard(target, guild) {
-  await ensureUser(target.id, guild.id);
-  const userData = await getUser(target.id, guild.id);
+  const userData = await getEffectiveUserData(target.id, guild.id);
   const rank = await getUserRank(target.id, guild.id) || 0;
 
   const totalXp = userData?.xp || 0;

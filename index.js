@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { deployCommands } = require('./deployCommands');
+const { deployCommands } = require('./deploy-commands');
 const { startBot } = require('./src/bot');
 const { startWebServer } = require('./src/web/server');
 const registerAdvancedLogs = require('./src/utils/advancedLogs.js');

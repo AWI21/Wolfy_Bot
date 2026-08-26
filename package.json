@@ -1,6 +1,6 @@
 {
   "name": "awi-bot",
-  "version": "4.0.7",
+  "version": "4.0.8",
   "description": "AWI Studios — Discord Bot Framework",
   "main": "index.js",
   "scripts": {

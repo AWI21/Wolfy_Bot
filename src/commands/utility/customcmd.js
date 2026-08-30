@@ -18,20 +18,18 @@ module.exports = {
   name: 'customcmd',
   aliases: ['cc', 'addcmd'],
 
-  
   slashData: new SlashCommandBuilder()
       .setName('customcmd').setDescription('Manage custom commands')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       .addSubcommand(s => s.setName('add').setDescription('Add a custom command')
           .addStringOption(o => o.setName('trigger').setDescription('Trigger word').setRequired(true))
-          .addStringOption(o => o.setName('response').setDescription('Response ({author}, {target}, {random:1-100}, opt1|opt2)').setRequired(true))
+          .addStringOption(o => o.setName('response').setDescription('Response ({author}, {target}, {random:1-100}, {give_xp:50})').setRequired(true))
           .addIntegerOption(o => o.setName('cooldown').setDescription('Cooldown in seconds (e.g. 30)').setRequired(false))
           .addRoleOption(o => o.setName('role').setDescription('Optional: Role required to use this command')))
       .addSubcommand(s => s.setName('remove').setDescription('Remove a command')
           .addStringOption(o => o.setName('trigger').setDescription('Trigger to remove').setRequired(true)))
       .addSubcommand(s => s.setName('list').setDescription('List all custom commands')),
 
-  
   async execute(message, args, client, prefix) {
     if (!requirePerms(message, PermissionFlagsBits.ManageGuild)) return;
     const sub = args[0]?.toLowerCase();
@@ -41,16 +39,13 @@ module.exports = {
       let cooldown = 0;
       let responseStartIndex = 2;
 
-      
       if (args[2] && /^(\d+)([smh])?$/i.test(args[2])) {
         cooldown = parseCooldown(args[2]);
         responseStartIndex = 3;
       }
 
-      
       const allowedRoles = message.mentions.roles.map(r => r.id);
 
-      
       let response = args.slice(responseStartIndex).join(' ').replace(/<@&\d+>/g, '').trim();
 
       if (!trigger || !response) {
@@ -61,12 +56,13 @@ module.exports = {
           `• \`{author}\` — Mentions the person running the command.`,
           `• \`{target}\` — Mentions the tagged user. *(Requires a ping when executed!)*`,
           `• \`{random:min-max}\` — Rolls a random number *(e.g. \`{random:1-100}\`)*.`,
+          `• \`{give_xp:amount}\` — Awards XP *(e.g. \`{give_xp:50}\` or \`{give_xp:10-50}\`)*.`,
           `\n🔥 **Advanced Features & Tags:**`,
           `• \`opt1 | opt2\` — Randomly selects one response.`,
           `• \`[X%] response\` — Sets percentage odds *(e.g. \`[10%] Win | [90%] Loss\`)*.`,
           `• \`{ping:everyone}\` / \`{ping:here}\` — Safely pings @everyone or @here.`,
           `• \`{react:👍,👎}\` — Auto-adds emoji reactions to the bot message.`,
-          `\n*Example: \`${prefix}customcmd add spark 30s [99%] 💨 {author} failed! | [1%] 🎰 {ping:everyone}\`*`
+          `\n*Example: \`${prefix}customcmd add daily 24h {author} claimed daily bonus and got {give_xp:100}!\`*`
         ].join('\n');
 
         return message.reply({ embeds: [errorEmbed(guideText)] });
@@ -87,7 +83,6 @@ module.exports = {
     return message.reply({ embeds: [await buildListEmbed(message.guild, prefix)] });
   },
 
-  
   async executeSlash(interaction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const sub = interaction.options.getSubcommand();
